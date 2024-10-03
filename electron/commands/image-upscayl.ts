@@ -20,9 +20,13 @@ import { DEFAULT_MODELS } from "../../common/models-list";
 import getFilenameFromPath from "../../common/get-file-name";
 import decodePath from "../../common/decode-path";
 import getDirectoryFromPath from "../../common/get-directory-from-path";
+import readMetadata from "../utils/read-metadata";
+import writeMetadata from "../utils/write-metadata";
+import { ExifTool } from "exiftool-vendored";
 
 const imageUpscayl = async (event, payload: ImageUpscaylPayload) => {
   const mainWindow = getMainWindow();
+  const exiftool = new ExifTool();
 
   if (!mainWindow) {
     logit("No main window found");
@@ -45,6 +49,20 @@ const imageUpscayl = async (event, payload: ImageUpscaylPayload) => {
   const fileNameWithExt = getFilenameFromPath(imagePath);
   const fileName = parse(fileNameWithExt).name;
 
+  // GET METADATA
+  let metadata;
+  try {
+    metadata = await readMetadata(imagePath, exiftool);
+  } catch (error) {
+    logit("❌ Error reading metadata: ", error);
+    mainWindow.webContents.send(
+      COMMAND.UPSCAYL_ERROR,
+      "Failed to read metadata.",
+    );
+    exiftool.end();
+    return;
+  }
+
   const outFile =
     outputDir +
     slash +
@@ -60,9 +78,12 @@ const imageUpscayl = async (event, payload: ImageUpscaylPayload) => {
   // Check if windows can write the new filename to the file system
   if (outFile.length >= 255) {
     logit("Filename too long for Windows.");
-    mainWindow.webContents.send(COMMAND.UPSCAYL_ERROR, "The filename exceeds the maximum path length allowed by Windows. Please shorten the filename or choose a different save location.");
+    mainWindow.webContents.send(
+      COMMAND.UPSCAYL_ERROR,
+      "The filename exceeds the maximum path length allowed by Windows. Please shorten the filename or choose a different save location.",
+    );
   }
-  
+
   // UPSCALE
   if (fs.existsSync(outFile) && !overwrite) {
     // If already upscayled, just output that file
@@ -118,6 +139,7 @@ const imageUpscayl = async (event, payload: ImageUpscaylPayload) => {
       mainWindow.webContents.send(COMMAND.UPSCAYL_PROGRESS, data.toString());
       if (data.includes("Error")) {
         upscayl.kill();
+        exiftool.end();
         failed = true;
       } else if (data.includes("Resizing")) {
         mainWindow.webContents.send(COMMAND.SCALING_AND_CONVERTING);
@@ -129,13 +151,24 @@ const imageUpscayl = async (event, payload: ImageUpscaylPayload) => {
       mainWindow.webContents.send(COMMAND.UPSCAYL_ERROR, data.toString());
       failed = true;
       upscayl.kill();
+      exiftool.end();
       return;
     };
     const onClose = async () => {
       if (!failed && !stopped) {
+        try {
+          await writeMetadata(outFile, metadata, exiftool);
+        } catch (error) {
+          logit("❌ Error writing metadata: ", error);
+          mainWindow.webContents.send(
+            COMMAND.UPSCAYL_ERROR,
+            "Failed to write metadata.",
+          );
+        }
         logit("💯 Done upscaling");
         // Free up memory
         upscayl.kill();
+        exiftool.end();
         mainWindow.setProgressBar(-1);
         mainWindow.webContents.send(COMMAND.UPSCAYL_DONE, outFile);
         showNotification("Upscayl", "Image upscayled successfully!");
